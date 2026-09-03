@@ -19,3 +19,4 @@ function updatePlayer(h, player)
         'YData', [player.Position(2), player.Position(2) + h.HeadingLength * sin(player.Heading)]);
 
 end
+% test
