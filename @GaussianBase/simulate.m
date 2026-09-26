@@ -10,6 +10,8 @@ arguments (Output)
 end
 
 % Draw m realisations of a Gaussian random variable
-n = obj.dim();
-X = nan(n, m);
-% TODO: Merge from MCHA4100
+mu = obj.mean();
+S  = obj.sqrtCov();
+
+W = randn(obj.dim(), double(m));    % W ~ N(0, I)
+X = mu + S.'*W;                     % X = mu + S.'*W ~ N(mu, S.'*S)

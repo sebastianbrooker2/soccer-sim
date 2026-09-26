@@ -9,7 +9,11 @@ systemNext = obj;    % Copy system state (System has value semantics since it do
 systemNext.time = timeNext;
 
 % Update estimator state
-if obj.runEstimator
+% (dt == 0 is a legitimate input -- e.g. two measurement events from
+% different sensors sharing the same timestamp -- and should leave the
+% density exactly as it was, matching the C++ reference's
+% `if (dt == 0.0) return;` guard in SystemEstimator::predict)
+if obj.runEstimator && dt > 0
     % Augment state density with independent noise increment dw ~ N(0, Q*dt)
     % [  x ] ~ N([ mu ], [ P,    0 ])
     % [ dw ]    ([  0 ]  [ 0, Q*dt ])

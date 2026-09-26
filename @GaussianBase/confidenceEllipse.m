@@ -13,9 +13,8 @@ end
 n = obj.dim();
 assert(n == 2, 'Expected bivariate Gaussian');
 
-c = nan;                            % Probability mass enclosed by n_sigma standard deviations
-r = nan;                            % Radius in w coords
+c = 2*normcdf(n_sigma) - 1;         % Probability mass enclosed by n_sigma standard deviations
+r = sqrt(chi2inv(c, n));            % Radius in w coords
 t = linspace(0, 2*pi, n_samples);   % Sampling angles for circle
 W = r*[cos(t); sin(t)];             % Circle sampling points in w coords
-X = nan(size(W));                   % Points on ellipse in x coords
-% TODO: Merge from MCHA4100
+X = obj.mean() + obj.sqrtCov().'*W; % Points on ellipse in x coords
