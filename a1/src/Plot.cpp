@@ -1,0 +1,1114 @@
+#include <algorithm>
+#include <cassert>
+#include <cmath>
+#include <vector>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
+#include <memory>
+
+#include <Eigen/Core>
+#include <Eigen/QR>
+#include <Eigen/Eigenvalues>
+
+#include <opencv2/core/eigen.hpp>
+#include <opencv2/imgproc.hpp>
+
+#define vtkRenderingContext2D_AUTOINIT 1(vtkRenderingContextOpenGL2)
+#define vtkRenderingCore_AUTOINIT 3(vtkInteractionStyle,vtkRenderingFreeType,vtkRenderingOpenGL2)
+#define vtkRenderingOpenGL2_AUTOINIT 1(vtkRenderingGL2PSOpenGL2)
+
+#include <vtkActor.h>
+#include <vtkAxesActor.h>
+#include <vtkAxisFollower.h>
+#include <vtkBMPWriter.h>
+#include <vtkCallbackCommand.h>
+#include <vtkCamera.h>
+#include <vtkCaptionActor2D.h>
+#include <vtkCellArray.h>
+#include <vtkCellData.h>
+#include <vtkColor.h>
+#include <vtkContextInteractorStyle.h>
+#include <vtkContourFilter.h>
+#include <vtkCubeAxesActor.h>
+#include <vtkDataSetMapper.h>
+#include <vtkGeometryFilter.h>
+#include <vtkImageActor.h>
+#include <vtkImageCast.h>
+#include <vtkImageConstantPad.h>
+#include <vtkImageData.h>
+#include <vtkImageGradient.h>
+#include <vtkImageImport.h>
+#include <vtkImageLuminance.h>
+#include <vtkImageMapper.h>
+#include <vtkInteractorStyleImage.h>
+#include <vtkInteractorStyleTrackballCamera.h>
+#include <vtkJPEGWriter.h>
+#include <vtkLine.h>
+#include <vtkNamedColors.h>
+#include <vtkNew.h>
+#include <vtkOrientationMarkerWidget.h>
+#include <vtkOutlineFilter.h>
+#include <vtkPlaneSource.h>
+#include <vtkPNGWriter.h>
+#include <vtkPNMWriter.h>
+#include <vtkPoints.h>
+#include <vtkPolyData.h>
+#include <vtkPolyDataMapper.h>
+#include <vtkPostScriptWriter.h>
+#include <vtkProperty.h>
+#include <vtkProperty2D.h>
+#include <vtkPyramid.h>
+#include <vtkQuadric.h>
+#include <vtkRenderer.h>
+#include <vtkRenderWindow.h>
+#include <vtkRenderWindowInteractor.h>
+#include <vtkSampleFunction.h>
+#include <vtkSmartPointer.h>
+#include <vtkStripper.h>
+#include <vtkTextProperty.h>
+#include <vtkThreshold.h>
+#include <vtkTIFFWriter.h>
+#include <vtkTransform.h>
+#include <vtkUnsignedCharArray.h>
+#include <vtkUnstructuredGrid.h>
+#include <vtkWindowToImageFilter.h>
+#include <vtkVectorText.h>
+#include <vtkFollower.h>
+
+// For compatibility with new VTK generic data arrays
+#ifdef vtkGenericDataArray_h
+#define InsertNextTupleValue InsertNextTypedTuple
+#endif
+
+#include "Camera.h"
+#include "GaussianInfo.hpp"
+#include "rotation.hpp"
+#include "SystemSLAM.h"
+#include "MeasurementSLAM.h"
+#include "MeasurementSLAMUniqueTagBundle.h"
+#include "MeasurementSLAMDuckBundle.h"
+#include "Plot.h"
+
+// Forward declarations
+static void hsv2rgb(const double & h, const double & s, const double & v, double & r, double & g, double & b);
+static void plotGaussianConfidenceEllipse(cv::Mat & img, const GaussianInfo<double> & prQOi, const Eigen::Vector3d & color);
+static void openCV2VTK(const cv::Mat & viewCVRGB, vtkImageData * viewVTK);
+
+// File-scope flag for camera view persistence
+static bool g_userHasInteracted = false;
+
+// -------------------------------------------------------
+// Bounds
+// -------------------------------------------------------
+
+Bounds::Bounds()
+    : xmin(0), xmax(0)
+    , ymin(0), ymax(0)
+    , zmin(0), zmax(0)
+{}
+
+void Bounds::getVTKBounds(double * bounds) const
+{
+    bounds[0] = xmin;
+    bounds[1] = xmax;
+    bounds[2] = ymin;
+    bounds[3] = ymax;
+    bounds[4] = zmin;
+    bounds[5] = zmax;
+}
+
+void Bounds::setExtremity(Bounds & extremity) const
+{
+    extremity.xmin = std::min(extremity.xmin, xmin);
+    extremity.xmax = std::max(extremity.xmax, xmax);
+
+    extremity.ymin = std::min(extremity.ymin, ymin);
+    extremity.ymax = std::max(extremity.ymax, ymax);
+
+    extremity.zmin = std::min(extremity.zmin, zmin);
+    extremity.zmax = std::max(extremity.zmax, zmax);
+}
+
+void Bounds::calculateMaxMinSigmaPoints(const GaussianInfo<double> & positionDensity, const double sigma)
+{
+    assert(positionDensity.dim() == 3);
+
+    // Marginals
+    GaussianInfo px = positionDensity.marginal(Eigen::seqN(0, 1));
+    GaussianInfo py = positionDensity.marginal(Eigen::seqN(1, 1));
+    GaussianInfo pz = positionDensity.marginal(Eigen::seqN(2, 1));
+
+    double mux = px.mean()(0);
+    double muy = py.mean()(0);
+    double muz = pz.mean()(0);
+
+    double Sxx = px.sqrtCov()(0, 0);
+    double Syy = py.sqrtCov()(0, 0);
+    double Szz = pz.sqrtCov()(0, 0);
+
+    // Make ellipsoids 2x bigger for better visibility
+    double scale = 2.0;
+    xmin = mux - sigma*std::abs(Sxx)*scale;
+    xmax = mux + sigma*std::abs(Sxx)*scale;
+
+    ymin = muy - sigma*std::abs(Syy)*scale;
+    ymax = muy + sigma*std::abs(Syy)*scale;
+
+    zmin = muz - sigma*std::abs(Szz)*scale;
+    zmax = muz + sigma*std::abs(Szz)*scale;
+}
+
+// -------------------------------------------------------
+// QuadricPlot
+// -------------------------------------------------------
+
+QuadricPlot::QuadricPlot()
+    : contourActor(vtkSmartPointer<vtkActor>::New())
+    , contours(vtkSmartPointer<vtkContourFilter>::New())
+    , contourMapper(vtkSmartPointer<vtkPolyDataMapper>::New())
+    , quadric(vtkSmartPointer<vtkQuadric>::New())
+    , sample(vtkSmartPointer<vtkSampleFunction>::New())
+    , value(0.0)
+    , isInit(false)
+{
+    int ns          = 25;
+    sample->SetSampleDimensions(ns, ns, ns);
+    sample->SetImplicitFunction(quadric);
+
+    // create the 0 isosurface
+    contours->SetInputConnection(sample->GetOutputPort());
+    contours->GenerateValues(1, value, value);
+
+    contourMapper->SetInputConnection(contours->GetOutputPort());
+    contourMapper->ScalarVisibilityOff();
+
+    contourActor->SetMapper(contourMapper);
+
+    isInit = true;
+}
+
+void QuadricPlot::update(const GaussianInfo<double> & positionDensity)
+{ 
+    assert(isInit);
+
+    assert(positionDensity.dim() == 3);
+
+    bounds.calculateMaxMinSigmaPoints(positionDensity, 6);
+
+    // Get quadric surface coefficients from Gaussian position density
+    Eigen::Matrix4d Q = positionDensity.quadricSurface(3);
+    double a0, a1, a2, a3, a4, a5, a6, a7, a8, a9;
+    
+    a0 = Q(0,0);     // TODO: Lab 8
+    a1 = Q(1,1);     // TODO: Lab 8
+    a2 = Q(2,2);     // TODO: Lab 8
+    a3 = 2*Q(0,1);     // TODO: Lab 8
+    a4 = 2*Q(1,2);     // TODO: Lab 8
+    a5 = 2*Q(0,2);     // TODO: Lab 8
+    a6 = 2*Q(0,3);     // TODO: Lab 8
+    a7 = 2*Q(1,3);     // TODO: Lab 8
+    a8 = 2*Q(2,3);     // TODO: Lab 8
+    a9 = Q(3,3);     // TODO: Lab 8
+
+    quadric->SetCoefficients(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9);
+
+    double boundsVTK[6];
+    bounds.getVTKBounds(boundsVTK);
+    sample->SetModelBounds(boundsVTK);
+}
+
+vtkActor * QuadricPlot::getActor() const
+{ 
+    assert(isInit);
+    return contourActor;
+}
+
+// -------------------------------------------------------
+// FrustumPlot
+// -------------------------------------------------------
+
+FrustumPlot::FrustumPlot(const Camera & camera)
+    : pyramidActor(vtkSmartPointer<vtkActor>::New())
+    , cells(vtkSmartPointer<vtkCellArray>::New())
+    , mapper(vtkSmartPointer<vtkDataSetMapper>::New())
+    , pyramidPts(vtkSmartPointer<vtkPoints>::New())
+    , pyramid(vtkSmartPointer<vtkPyramid>::New())
+    , ug(vtkSmartPointer<vtkUnstructuredGrid>::New())
+    , rPCc(Eigen::MatrixXd::Zero(3,5))
+    , rPNn(Eigen::MatrixXd::Zero(3,5))
+    , isInit(false)
+{
+    int nu, nv;
+    nu = camera.imageSize.width;
+    nv = camera.imageSize.height;
+
+    std::vector<cv::Point2f> p_cv;
+    p_cv.push_back(cv::Point2f(   0,    0));
+    p_cv.push_back(cv::Point2f(nu-1,    0));
+    p_cv.push_back(cv::Point2f(nu-1, nv-1));
+    p_cv.push_back(cv::Point2f(   0, nv-1));
+
+    std::vector<cv::Point2f> rZCc2_cv;
+    cv::undistortPoints(p_cv, rZCc2_cv, camera.cameraMatrix, camera.distCoeffs);
+
+    Eigen::MatrixXd rZCc2(2,4);
+    for (int i = 0; i < rZCc2.cols(); ++i)
+    {
+        rZCc2.col(i) << rZCc2_cv[i].x,  rZCc2_cv[i].y;
+    } 
+
+    Eigen::MatrixXd rZCc(3,4), nrZCc;
+    rZCc.fill(1);
+    rZCc.topRows(2)     = rZCc2;
+    nrZCc               = rZCc.colwise().squaredNorm().cwiseSqrt();
+
+    for (int i = 0; i < rZCc.cols(); ++i)
+    {
+        rZCc.col(i)            = rZCc.col(i) / nrZCc(0,i);
+    }
+    
+    double d            = 4;  // Increased from 0.5 to make frustum 100x larger
+    rPCc.block(0,0,3,4) = d*rZCc;
+    rPCc.block(0,4,3,1) << 0,0,0;
+
+    pyramidPts->SetNumberOfPoints(5);
+
+    pyramid->GetPointIds()->SetId(0, 0);
+    pyramid->GetPointIds()->SetId(1, 1);
+    pyramid->GetPointIds()->SetId(2, 2);
+    pyramid->GetPointIds()->SetId(3, 3);
+    pyramid->GetPointIds()->SetId(4, 4);
+
+    cells->InsertNextCell(pyramid);
+
+    ug->SetPoints(pyramidPts);
+    ug->InsertNextCell(pyramid->GetCellType(), pyramid->GetPointIds());
+
+    mapper->SetInputData(ug);
+
+    vtkNew<vtkNamedColors> colors;
+    pyramidActor->SetMapper(mapper);
+    pyramidActor->GetProperty()->SetColor(colors->GetColor3d("Tomato").GetData());
+    pyramidActor->GetProperty()->SetOpacity(0.1);   
+
+    isInit = true;
+}
+
+void FrustumPlot::update(const Eigen::Vector3d & rCNn, const Eigen::Vector3d & Thetanc)
+{   
+    assert(isInit);
+    Eigen::Matrix3d Rnc = rpy2rot(Thetanc);
+
+    rPNn = (Rnc*rPCc).colwise() + rCNn;
+
+    pyramidPts->SetPoint(0, rPNn.col(0).data());
+    pyramidPts->SetPoint(1, rPNn.col(1).data());
+    pyramidPts->SetPoint(2, rPNn.col(2).data());
+    pyramidPts->SetPoint(3, rPNn.col(3).data());
+    pyramidPts->SetPoint(4, rPNn.col(4).data());
+    
+    pyramidPts->Modified();
+    ug->Modified();
+    mapper->Modified();
+}
+
+vtkActor * FrustumPlot::getActor() const
+{
+    assert(isInit);
+    return pyramidActor;
+}
+
+
+// -------------------------------------------------------
+// AxisPlot
+// -------------------------------------------------------
+
+AxisPlot::AxisPlot()
+    : cubeAxesActor(vtkSmartPointer<vtkCubeAxesActor>::New())
+    , isInit(false)
+{
+    vtkNew<vtkNamedColors> colors;
+    axis1Color = colors->GetColor3d("Salmon");
+    axis2Color = colors->GetColor3d("PaleGreen");
+    axis3Color = colors->GetColor3d("LightSkyBlue");
+}
+
+void AxisPlot::init(vtkCamera *cam)
+{
+    int fontsize    = 12;
+
+    cubeAxesActor->SetCamera(cam);
+    cubeAxesActor->GetTitleTextProperty(0)->SetColor(axis1Color.GetData());
+    cubeAxesActor->GetTitleTextProperty(0)->SetFontSize(fontsize);
+    cubeAxesActor->GetLabelTextProperty(0)->SetColor(axis1Color.GetData());
+    cubeAxesActor->GetLabelTextProperty(0)->SetFontSize(fontsize);
+
+    cubeAxesActor->GetTitleTextProperty(1)->SetColor(axis2Color.GetData());
+    cubeAxesActor->GetTitleTextProperty(1)->SetFontSize(fontsize);
+    cubeAxesActor->GetLabelTextProperty(1)->SetColor(axis2Color.GetData());
+    cubeAxesActor->GetLabelTextProperty(1)->SetFontSize(fontsize);
+
+    cubeAxesActor->GetTitleTextProperty(2)->SetColor(axis3Color.GetData());
+    cubeAxesActor->GetTitleTextProperty(2)->SetFontSize(fontsize);
+    cubeAxesActor->GetLabelTextProperty(2)->SetColor(axis3Color.GetData());
+    cubeAxesActor->GetLabelTextProperty(2)->SetFontSize(fontsize);
+    
+    cubeAxesActor->SetXTitle("N - [m]");
+    cubeAxesActor->SetYTitle("E - [m]");
+    cubeAxesActor->SetZTitle("D - [m]");
+
+    cubeAxesActor->XAxisMinorTickVisibilityOn();
+    cubeAxesActor->YAxisMinorTickVisibilityOn();
+    cubeAxesActor->ZAxisMinorTickVisibilityOn();
+
+    // cubeAxesActor->SetFlyModeToStaticEdges();
+    cubeAxesActor->SetFlyModeToFurthestTriad();
+    cubeAxesActor->SetUseTextActor3D(1); 
+
+    isInit  = true;
+}
+
+void AxisPlot::update(const Bounds & bounds)
+{
+    assert(isInit);
+
+    double boundsVTK[6];
+    bounds.getVTKBounds(boundsVTK);
+
+    cubeAxesActor->SetBounds(boundsVTK);
+}
+
+vtkActor * AxisPlot::getActor() const
+{
+    assert(isInit);
+    return cubeAxesActor;
+}
+
+// -------------------------------------------------------
+// BasisPlot
+// -------------------------------------------------------
+
+BasisPlot::BasisPlot()
+    : axesActor(vtkSmartPointer<vtkAxesActor>::New())
+    , transform(vtkSmartPointer<vtkTransform>::New())
+    , isInit(false)
+{
+    // Set the length of the axes (10x larger for better visibility)
+    axesActor->SetTotalLength(1.0, 1.0, 1.0);
+
+    // Disable axis label text
+    axesActor->GetXAxisCaptionActor2D()->GetCaptionTextProperty()->SetOpacity(0);
+    axesActor->GetYAxisCaptionActor2D()->GetCaptionTextProperty()->SetOpacity(0);
+    axesActor->GetZAxisCaptionActor2D()->GetCaptionTextProperty()->SetOpacity(0);
+
+    // Set line thickness
+    const double radius = 0.02;
+    axesActor->SetShaftTypeToCylinder();
+    axesActor->SetCylinderRadius(radius);
+
+    // Set default transformation matrix and apply it to the axes actor
+    transform->Identity();
+    axesActor->SetUserTransform(transform);
+
+    isInit = true;
+}
+
+void BasisPlot::update(const Eigen::Vector3d & rCNn, const Eigen::Vector3d & Thetanc)
+{
+    assert(isInit);
+    
+    // Convert Thetanc to a rotation matrix
+    Eigen::Matrix3d Rnc = rpy2rot(Thetanc);
+
+    // Update homogeneous transformation matrix via a map
+    Eigen::Map<Eigen::Matrix<double, 4, 4, Eigen::RowMajor>> Tnc(transform->GetMatrix()->GetData());
+    Tnc << Rnc, rCNn, 
+           0, 0, 0, 1;
+
+    // Notify VTK that the axes actor has been modified
+    axesActor->Modified();
+}
+
+vtkProp3D * BasisPlot::getActor() const
+{
+    assert(isInit);
+    return axesActor;
+}
+
+// -------------------------------------------------------
+// ImagePlot
+// -------------------------------------------------------
+
+ImagePlot::ImagePlot()
+    : viewVTK(vtkSmartPointer<vtkImageData>::New())
+    , imageActor2d(vtkSmartPointer<vtkActor2D>::New())
+    , imageMapper(vtkSmartPointer<vtkImageMapper>::New())
+    , width(0)
+    , height(0)
+    , isInit(false)
+{
+    imageMapper->SetInputData(viewVTK);
+    imageMapper->SetColorWindow(255.0);
+    imageMapper->SetColorLevel(127.5);
+    
+    imageActor2d->SetMapper(imageMapper);
+}
+
+void ImagePlot::init(double rendererWidth, double rendererHeight)
+{
+    width   = rendererWidth;
+    height  = rendererHeight;
+
+    isInit  = true;
+}
+
+void ImagePlot::update(const cv::Mat & view)
+{
+    assert(isInit);
+
+    cv::Mat viewCVrgb, tmp;
+    cv::resize(view, tmp, cv::Size(width, height), cv::INTER_LINEAR);
+    cv::cvtColor(tmp, viewCVrgb, cv::COLOR_BGR2RGB);
+    cv::flip(viewCVrgb, cvVTKBuffer, 0);
+    openCV2VTK(cvVTKBuffer, viewVTK);
+}
+
+vtkActor2D * ImagePlot::getActor() const
+{
+    assert(isInit);
+    return imageActor2d;
+}
+
+
+// -------------------------------------------------------
+// Plot
+// -------------------------------------------------------
+
+void Plot::setData(const SystemSLAM & system, const MeasurementSLAM & measurement)
+{
+    pSystem.reset(system.clone());
+    pMeasurement.reset(measurement.clone());
+}
+
+
+cv::Mat Plot::getFrame() const
+{
+    cv::Mat frame;
+    int *size = renderWindow->GetSize();
+    int & w = size[0];
+    int & h = size[1];
+    std::shared_ptr<unsigned char[]> pixels(renderWindow->GetPixelData(0, 0, w - 1, h - 1, 0));
+    cv::Mat frameBufferRGB(h, w, CV_8UC3, pixels.get());
+    cv::Mat frameBufferBGR;
+    cv::cvtColor(frameBufferRGB, frameBufferBGR, cv::COLOR_RGB2BGR);
+    cv::flip(frameBufferBGR, frame, 0); // Flip vertically
+    return frame;
+}
+
+Plot::Plot(const Camera & camera)
+    : camera(camera)
+    , renderWindow(vtkSmartPointer<vtkRenderWindow>::New())
+    , threeDimRenderer(vtkSmartPointer<vtkRenderer>::New())
+    , imageRenderer(vtkSmartPointer<vtkRenderer>::New())
+    , interactor(vtkSmartPointer<vtkRenderWindowInteractor>::New())
+    , fp(camera)
+    , ap()
+    , bp()
+    , ip()
+    , trailActor(vtkSmartPointer<vtkActor>::New())
+    , trailPolyData(vtkSmartPointer<vtkPolyData>::New())
+    , trailPoints(vtkSmartPointer<vtkPoints>::New())
+    , trailLines(vtkSmartPointer<vtkCellArray>::New())
+{
+    double aspectRatio  = (1.0*camera.imageSize.width)/camera.imageSize.height;
+
+    double windowHeight       = 2*540;                      // Set to 540 (or smaller as needed) for low resolution displays
+    double windowWidth        = 2*aspectRatio*windowHeight; // Double-wide to accommodate side-by-side view
+
+    vtkNew<vtkNamedColors> colors;
+    double quadricViewport[4]       = {0.5, 0.0, 1.0, 1.0};
+    threeDimRenderer->SetViewport(quadricViewport);
+    threeDimRenderer->SetBackground(colors->GetColor3d("slategray").GetData());
+
+    double imageViewport[4]         = {0.0, 0.0, 0.5, 1.0};
+    imageRenderer->SetViewport(imageViewport);
+    imageRenderer->SetBackground(colors->GetColor3d("white").GetData());
+
+    renderWindow->SetSize(windowWidth, windowHeight);
+
+    renderWindow->SetMultiSamples(0);
+    renderWindow->AddRenderer(threeDimRenderer);
+    renderWindow->AddRenderer(imageRenderer);
+
+    ap.init(threeDimRenderer->GetActiveCamera());
+    ip.init(windowWidth/2, windowHeight);
+
+    // Quadric surfaces
+    qpLandmarks.clear();
+
+    // Setup trail visualization
+    trailPolyData->SetPoints(trailPoints);
+    trailPolyData->SetLines(trailLines);
+    vtkNew<vtkPolyDataMapper> trailMapper;
+    trailMapper->SetInputData(trailPolyData);
+    trailActor->SetMapper(trailMapper);
+    trailActor->GetProperty()->SetColor(1.0, 0.5, 0.0); // Orange color
+    trailActor->GetProperty()->SetLineWidth(3.0);
+    
+    threeDimRenderer->AddActor(ap.getActor());
+    threeDimRenderer->AddActor(bp.getActor());
+    threeDimRenderer->AddActor(fp.getActor());
+    threeDimRenderer->AddActor(qpCamera.getActor());
+    threeDimRenderer->AddActor(trailActor);
+    imageRenderer->AddActor2D(ip.getActor());
+
+    threeDimRenderer->GetActiveCamera()->Azimuth(0);
+    threeDimRenderer->GetActiveCamera()->Elevation(165);
+    // rFNn - focal point at origin
+    threeDimRenderer->GetActiveCamera()->SetFocalPoint(0,0,0);
+    // rCNn - position camera further back to see larger scene
+    double sc = 10;  // Increased from 2 to 10 to accommodate landmarks at ~2m ± 5m
+    threeDimRenderer->GetActiveCamera()->SetPosition(-0.75*sc,-0.75*sc,-0.5*sc);
+    threeDimRenderer->GetActiveCamera()->SetViewUp(0,0,-1);
+
+    vtkNew<vtkInteractorStyleTrackballCamera> interactorStyle;
+    interactor->SetInteractorStyle(interactorStyle);
+    interactor->SetRenderWindow(renderWindow);
+    interactor->Initialize();
+}
+
+void Plot::render()
+{
+    double r,g,b;   
+    hsv2rgb(330, 1., 1., r, g, b);
+    
+    qpCamera.update(pSystem->cameraPositionDensity(camera));
+    qpCamera.getActor()->GetProperty()->SetOpacity(0.1);
+    qpCamera.getActor()->GetProperty()->SetColor(r,g,b);
+
+    Bounds globalBounds;
+    qpCamera.bounds.setExtremity(globalBounds);
+    
+    // Grow landmark quadric plots to match number of landmarks
+    while (qpLandmarks.size() < pSystem->numberLandmarks())
+    {
+        QuadricPlot qp;
+        qpLandmarks.push_back(qp);
+        threeDimRenderer->AddActor(qpLandmarks.back().getActor());
+    }
+
+    // Shrink landmark quadric plots to match number of landmarks
+    while (qpLandmarks.size() > pSystem->numberLandmarks())
+    {
+        threeDimRenderer->RemoveActor(qpLandmarks.back().getActor());
+        qpLandmarks.pop_back();
+    }
+
+    // Get PRECOMPUTED data association from measurement (already computed during EKF update)
+    // DO NOT call associate() here - it would re-run with post-update camera pose!
+    std::vector<int> idxFeatures;
+    std::vector<int> landmarkToDetection(pSystem->numberLandmarks(), -1);
+    
+    // Different measurement types use different association conventions!
+    const MeasurementDuckBundle* pDuckMeas = dynamic_cast<const MeasurementDuckBundle*>(pMeasurement.get());
+    const MeasurementUniqueTagBundle* pTagMeas = dynamic_cast<const MeasurementUniqueTagBundle*>(pMeasurement.get());
+    
+    if (pDuckMeas != nullptr) {
+        idxFeatures = pDuckMeas->getAssociationStatus();
+        
+        // Duck convention: idxFeatures[landmarkIdx] = detectionIdx
+        // Already in the format we need! Just copy it
+        for (size_t landmarkIdx = 0; landmarkIdx < idxFeatures.size() && landmarkIdx < pSystem->numberLandmarks(); ++landmarkIdx) {
+            landmarkToDetection[landmarkIdx] = idxFeatures[landmarkIdx];
+        }
+        
+    } else if (pTagMeas != nullptr) {
+        idxFeatures = pTagMeas->getAssociationStatus();
+        
+        // ArUco convention: idxFeatures[detectionIdx] = landmarkIdx  
+        // Need to INVERT this to get landmark -> detection mapping
+        for (size_t detectionIdx = 0; detectionIdx < idxFeatures.size(); ++detectionIdx) {
+            int landmarkIdx = idxFeatures[detectionIdx];
+            if (landmarkIdx >= 0 && landmarkIdx < static_cast<int>(pSystem->numberLandmarks())) {
+                landmarkToDetection[landmarkIdx] = detectionIdx;
+            }
+        }
+    } else {
+        // Unknown measurement type - should not happen
+        std::cerr << "[PLOT ERROR] Unknown measurement type!" << std::endl;
+    }
+    
+    int blueCount = 0, redCount = 0, yellowCount = 0;
+    
+    for (std::size_t i = 0; i < pSystem->numberLandmarks(); ++i)
+    {
+        // Determine landmark status for color coding
+        bool isTracked = false;      // Successfully tracked (associated with a detection)
+        bool isVisible = false;       // Visible in camera view
+        int featureIdx = -1;          // Index in detected features if tracked
+        
+        // Use the inverted mapping to find which detection (if any) this landmark is associated with
+        featureIdx = landmarkToDetection[i];
+        if (featureIdx >= 0) {
+            isTracked = true;
+            isVisible = true;
+        }
+        
+            // If not tracked, check if it's at least visible (RED = has nearby unassociated detection)
+            if (!isTracked)
+            {
+                // Get landmark position in world frame
+                Eigen::Vector3d rLNn = pSystem->landmarkPositionDensity(i).mean();
+                
+                // Get camera pose
+                Eigen::VectorXd state = pSystem->density.mean();
+                Eigen::Vector3d rCNn = pSystem->cameraPositionDensity(camera).mean();
+                Eigen::Vector3d Thetanc = pSystem->cameraOrientationEulerDensity(camera).mean();
+                Eigen::Matrix3d Rnc = rpy2rot(Thetanc);
+                
+                // Transform landmark to camera frame
+                Eigen::Vector3d rLCc = Rnc.transpose() * (rLNn - rCNn);
+                
+                // Check if landmark is in front of camera (positive Z in camera frame)
+                if (rLCc(2) > 0.0)
+                {
+                    // Predict feature location to check if within image bounds
+                    GaussianInfo prQOi = pMeasurement->predictFeatureDensity(*pSystem, i);
+                    Eigen::VectorXd murQOi = prQOi.mean();
+                    
+                    int imgWidth = camera.imageSize.width;
+                    int imgHeight = camera.imageSize.height;
+                    
+                    if (murQOi(0) >= 0 && murQOi(0) < imgWidth &&
+                        murQOi(1) >= 0 && murQOi(1) < imgHeight)
+                    {
+                        // In bounds - but only mark as visible (RED) if there's a nearby UNASSOCIATED detection
+                        // Otherwise it should be YELLOW (off-screen or no detection)
+                        
+                        bool hasNearbyUnassocDet = false;
+                        const double NEARBY_THRESHOLD = 100.0;  // pixels - match pruning logic
+                        
+                        // Check for duck detections
+                        const MeasurementDuckBundle* pDuckMeas = dynamic_cast<const MeasurementDuckBundle*>(pMeasurement.get());
+                        if (pDuckMeas != nullptr) {
+                            const std::vector<cv::Point2f>& centroids = pDuckMeas->getCentroids();
+                            
+                            for (size_t detIdx = 0; detIdx < centroids.size(); ++detIdx) {
+                                // Check if this detection is already associated with another landmark
+                                bool detIsAssociated = false;
+                                for (size_t j = 0; j < landmarkToDetection.size(); ++j) {
+                                    if (landmarkToDetection[j] >= 0 && 
+                                        static_cast<size_t>(landmarkToDetection[j]) == detIdx) {
+                                        detIsAssociated = true;
+                                        break;
+                                    }
+                                }
+                                
+                                // Only check proximity for unassociated detections
+                                if (!detIsAssociated) {
+                                    const cv::Point2f& detection = centroids[detIdx];
+                                    double dx = detection.x - murQOi(0);
+                                    double dy = detection.y - murQOi(1);
+                                    double dist = std::sqrt(dx*dx + dy*dy);
+                                    if (dist < NEARBY_THRESHOLD) {
+                                        hasNearbyUnassocDet = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Only mark as visible (RED) if there's an unassociated detection nearby
+                        if (hasNearbyUnassocDet) {
+                            isVisible = true;
+                        }
+                    }
+                }
+            }
+        
+        // Set colors based on landmark status
+        // Blue: successfully tracked
+        // Red: visible but not detected
+        // Yellow: not visible
+        std::string colorName;
+        if (isTracked)
+        {
+            // Blue
+            r = 0.0; g = 0.0; b = 1.0;
+            colorName = "BLUE";
+            blueCount++;
+        }
+        else if (isVisible)
+        {
+            // Red - visible but not detected
+            r = 1.0; g = 0.0; b = 0.0;
+            colorName = "RED";
+            redCount++;
+            
+            // DEBUG: Analyze large red ellipses
+            GaussianInfo prQOi = pMeasurement->predictFeatureDensity(*pSystem, i);
+            Eigen::Matrix2d cov2D = prQOi.cov();
+            
+            // Get approximate ellipse size from covariance trace (simpler than eigenvalues)
+            double traceVal = cov2D.trace();  // Sum of diagonal elements
+            double ellipseSize = std::sqrt(traceVal) * 3.0;  // 3-sigma approximation
+            
+            // Get 3D position uncertainty
+            GaussianInfo positionDensity = pSystem->landmarkPositionDensity(i);
+            Eigen::Vector3d posStdDev = positionDensity.cov().diagonal().cwiseSqrt();
+            
+            // Get distance from camera
+            Eigen::Vector3d rLNn = positionDensity.mean();
+            Eigen::Vector3d rCNn = pSystem->cameraPositionDensity(camera).mean();
+            double distance = (rLNn - rCNn).norm();
+            
+            // Get predicted pixel position
+            Eigen::Vector2d predPixel = prQOi.mean();
+            
+            // Get individual covariance components
+            double covXX = cov2D(0, 0);
+            double covYY = cov2D(1, 1);
+            double covXY = cov2D(0, 1);
+            
+            std::cout << "[RED ELLIPSE] LM" << i << ":"
+                      << " predPix=(" << predPixel(0) << "," << predPixel(1) << ")"
+                      << " ellipseSize≈" << ellipseSize << "px"
+                      << " cov=[" << covXX << "," << covYY << "," << covXY << "]"
+                      << " posStdDev=[" << posStdDev(0) << "," << posStdDev(1) << "," << posStdDev(2) << "]m"
+                      << " dist=" << distance << "m" << std::endl;
+        }
+        else
+        {
+            // Yellow
+            r = 1.0; g = 1.0; b = 0.0;
+            colorName = "YELLOW";
+            yellowCount++;
+        }
+        
+        Eigen::Vector3d rgb;
+        rgb(0) = r*255;
+        rgb(1) = g*255;
+        rgb(2) = b*255;
+
+        // Plot confidence ellipse and detected marker center if visible
+        if (isVisible)
+        {
+            GaussianInfo prQOi = pMeasurement->predictFeatureDensity(*pSystem, i);
+            plotGaussianConfidenceEllipse(pSystem->view(), prQOi, rgb);
+            
+            // If tracked, also draw the actual detected duck/marker with landmark ID
+            if (isTracked && featureIdx >= 0)
+            {
+                // Get the measurement to access detected features
+                const MeasurementUniqueTagBundle * pMeas = dynamic_cast<const MeasurementUniqueTagBundle *>(pMeasurement.get());
+                if (pMeas && featureIdx < pMeas->getMarkerCorners().size())
+                {
+                    const auto & corners = pMeas->getMarkerCorners()[featureIdx];
+                    if (corners.size() == 4)
+                    {
+                        // Draw dots at each corner
+                        for (const auto & corner : corners)
+                        {
+                            cv::circle(pSystem->view(), corner, 3, cv::Scalar(rgb(2), rgb(1), rgb(0)), -1);
+                        }
+                        
+                        // Compute and draw center
+                        cv::Point2f center(0, 0);
+                        for (const auto & corner : corners)
+                        {
+                            center.x += corner.x;
+                            center.y += corner.y;
+                        }
+                        center.x /= 4.0f;
+                        center.y /= 4.0f;
+                        
+                        // Draw filled circle at ArUco center
+                        cv::circle(pSystem->view(), center, 5, cv::Scalar(rgb(2), rgb(1), rgb(0)), -1);
+                    }
+                }
+                
+                // Check if this is a duck detection (has centroids)
+                const MeasurementDuckBundle * pDuckMeas = dynamic_cast<const MeasurementDuckBundle *>(pMeasurement.get());
+                if (pDuckMeas && featureIdx < pDuckMeas->getCentroids().size())
+                {
+                    // Get the detected duck centroid
+                    cv::Point2f centroid = pDuckMeas->getCentroids()[featureIdx];
+                    
+                    // Draw landmark ID label near the duck
+                    std::string landmarkLabel = "LM" + std::to_string(i);
+                    cv::Point textPos(centroid.x + 15, centroid.y - 15);
+                    
+                    // Ensure text stays within image bounds
+                    int fontFace = cv::FONT_HERSHEY_SIMPLEX;
+                    double fontScale = 0.6;
+                    int thickness = 2;
+                    int baseline = 0;
+                    cv::Size textSize = cv::getTextSize(landmarkLabel, fontFace, fontScale, thickness, &baseline);
+                    
+                    if (textPos.x + textSize.width > pSystem->view().cols) {
+                        textPos.x = pSystem->view().cols - textSize.width - 5;
+                    }
+                    if (textPos.y - textSize.height < 0) {
+                        textPos.y = textSize.height + 5;
+                    }
+                    
+                    // Draw text background for better visibility
+                    cv::rectangle(pSystem->view(),
+                                 cv::Point(textPos.x - 2, textPos.y + baseline + 2),
+                                 cv::Point(textPos.x + textSize.width + 2, textPos.y - textSize.height - 2),
+                                 cv::Scalar(255, 255, 255), -1);
+                    
+                    // Draw landmark ID text
+                    cv::putText(pSystem->view(), landmarkLabel, textPos, fontFace, fontScale, 
+                               cv::Scalar(rgb(2), rgb(1), rgb(0)), thickness);
+                }
+            }
+        }
+
+        QuadricPlot & qp = qpLandmarks[i];
+        qp.update(pSystem->landmarkPositionDensity(i));
+        qp.getActor()->GetProperty()->SetOpacity(0.5);
+        qp.getActor()->GetProperty()->SetColor(r, g, b);
+        qp.bounds.setExtremity(globalBounds); 
+    }
+    
+    // Summary of landmark visibility status
+    std::cout << "[PLOT] Landmarks: BLUE=" << blueCount 
+              << " (tracked), RED=" << redCount << " (visible), YELLOW=" << yellowCount << " (not visible)" << std::endl;
+
+    ap.update(globalBounds);
+    Eigen::Vector3d rCNn = pSystem->cameraPositionDensity(camera).mean();
+    Eigen::Vector3d Thetanc = pSystem->cameraOrientationEulerDensity(camera).mean();
+    bp.update(rCNn, Thetanc);
+    fp.update(rCNn, Thetanc);
+    
+    // Remove old distance line actors
+    for (auto& actor : distanceLineActors) {
+        threeDimRenderer->RemoveActor(actor);
+    }
+    distanceLineActors.clear();
+    distanceLinePolyData.clear();
+    
+    // Draw distance lines from each landmark to camera
+    for (std::size_t i = 0; i < pSystem->numberLandmarks(); ++i) {
+        // Get landmark position
+        Eigen::Vector3d rLNn = pSystem->landmarkPositionDensity(i).mean();
+        
+        // Calculate distance
+        double distance = (rLNn - rCNn).norm();
+        
+        // Create line from landmark to camera
+        vtkNew<vtkPoints> linePoints;
+        linePoints->InsertNextPoint(rLNn.data());
+        linePoints->InsertNextPoint(rCNn.data());
+        
+        vtkNew<vtkLine> line;
+        line->GetPointIds()->SetId(0, 0);
+        line->GetPointIds()->SetId(1, 1);
+        
+        vtkNew<vtkCellArray> lines;
+        lines->InsertNextCell(line);
+        
+        vtkSmartPointer<vtkPolyData> linePolyData = vtkSmartPointer<vtkPolyData>::New();
+        linePolyData->SetPoints(linePoints);
+        linePolyData->SetLines(lines);
+        
+        vtkNew<vtkPolyDataMapper> lineMapper;
+        lineMapper->SetInputData(linePolyData);
+        
+        vtkSmartPointer<vtkActor> lineActor = vtkSmartPointer<vtkActor>::New();
+        lineActor->SetMapper(lineMapper);
+        lineActor->GetProperty()->SetColor(0.7, 0.7, 0.7);  // Gray lines
+        lineActor->GetProperty()->SetLineWidth(2.0);
+        
+        distanceLinePolyData.push_back(linePolyData);
+        distanceLineActors.push_back(lineActor);
+        threeDimRenderer->AddActor(lineActor);
+        
+        // Add distance text label at midpoint
+        Eigen::Vector3d midpoint = (rLNn + rCNn) / 2.0;
+        char distText[50];
+        snprintf(distText, sizeof(distText), "%.2fm", distance);
+        
+        vtkNew<vtkVectorText> textSource;
+        textSource->SetText(distText);
+        
+        vtkNew<vtkPolyDataMapper> textMapper;
+        textMapper->SetInputConnection(textSource->GetOutputPort());
+        
+        vtkNew<vtkFollower> textActor;
+        textActor->SetMapper(textMapper);
+        textActor->SetPosition(midpoint.data());
+        
+        // Smaller font for scenario 2 (ducks), normal for scenario 1 (ArUco)
+        double fontScale = (pDuckMeas != nullptr) ? 0.05 : 0.1;
+        textActor->SetScale(fontScale, fontScale, fontScale);
+        
+        textActor->GetProperty()->SetColor(1.0, 1.0, 1.0);  // White text
+        textActor->SetCamera(threeDimRenderer->GetActiveCamera());
+        
+        threeDimRenderer->AddActor(textActor);
+        distanceLineActors.push_back(textActor);  // Store text actor too
+    }
+    
+    ip.update(pSystem->view());
+    
+    // Update camera trail
+    cameraTrail.push_back(rCNn);
+    
+    // Rebuild trail visualization
+    trailPoints->Reset();
+    trailLines->Reset();
+    
+    for (size_t i = 0; i < cameraTrail.size(); ++i)
+    {
+        trailPoints->InsertNextPoint(cameraTrail[i].data());
+    }
+    
+    if (cameraTrail.size() > 1)
+    {
+        for (size_t i = 0; i < cameraTrail.size() - 1; ++i)
+        {
+            vtkNew<vtkLine> line;
+            line->GetPointIds()->SetId(0, i);
+            line->GetPointIds()->SetId(1, i + 1);
+            trailLines->InsertNextCell(line);
+        }
+    }
+    
+    trailPolyData->Modified();
+    
+    // Camera view: positioned at -15m North, -15m East, +15m Down from camera
+    static bool isFirstFrame = true;
+    
+    vtkCamera* vtk_cam = threeDimRenderer->GetActiveCamera();
+    
+    if (!g_userHasInteracted || isFirstFrame)
+    {
+        // Position: 15m down, -15m north, -15m east
+        // In NED: North=X, East=Y, Down=Z
+        vtk_cam->SetPosition(rCNn(0) - 7.0, rCNn(1) - 2, rCNn(2) + 0.4);
+        
+        // Look at the estimated camera position
+        vtk_cam->SetFocalPoint(rCNn(0), rCNn(1), rCNn(2));
+        
+        // Set up vector to point up (negative Z in NED frame)
+        vtk_cam->SetViewUp(0, -1, 0);
+        
+        isFirstFrame = false;
+    }
+    
+    renderWindow->Render();
+}
+
+void Plot::start() const
+{
+    interactor->Start(); // block on interactor
+}
+
+void Plot::markUserInteraction()
+{
+    // Mark that user has manually adjusted the camera view
+    g_userHasInteracted = true;
+}
+
+
+// -------------------------------------------------------
+// Miscellaneous
+// -------------------------------------------------------
+
+
+// Inputs
+// H \in [0, 360]
+// S \in [0, 1]
+// V \in [0, 1]
+// Outputs
+// R \in [0, 1]
+// G \in [0, 1]
+// B \in [0, 1]
+void hsv2rgb(const double & h, const double & s, const double & v, double & r, double & g, double & b)
+{
+    assert(0 <= h && h <=  360.0);
+    assert(0 <= s && s <=  1.0);
+    assert(0 <= v && v <=  1.0);
+
+    // https://en.wikipedia.org/wiki/HSL_and_HSV#HSV_to_RGB
+
+    double  c, x, r1 = 0, g1 = 0, b1 = 0, m;
+    int hp;
+    // shift the hue to the range [0, 360] before performing calculations
+    hp  = (int)(h / 60.);
+    c   = v*s;
+    x   = c * (1 - std::abs((hp % 2) - 1));
+
+    switch(hp) {
+        case 0: r1 = c; g1 = x; b1 = 0; break;
+        case 1: r1 = x; g1 = c; b1 = 0; break;
+        case 2: r1 = 0; g1 = c; b1 = x; break;
+        case 3: r1 = 0; g1 = x; b1 = c; break;
+        case 4: r1 = x; g1 = 0; b1 = c; break;
+        case 5: r1 = c; g1 = 0; b1 = x; break;
+    }
+    m   = v - c;
+    r   = r1 + m;
+    g   = g1 + m;
+    b   = b1 + m;
+}
+
+void openCV2VTK(const cv::Mat & viewCVRGB, vtkImageData* viewVTK)
+{
+    assert( viewCVRGB.data != NULL );
+
+    vtkNew<vtkImageImport> importer;
+    if ( viewVTK )
+    {
+        importer->SetOutput( viewVTK );
+    }
+    importer->SetDataSpacing( 1, 1, 1 );
+    importer->SetDataOrigin( 0, 0, 0 );
+    importer->SetWholeExtent(   0, viewCVRGB.size().width-1, 0,
+                            viewCVRGB.size().height-1, 0, 0 );
+    importer->SetDataExtentToWholeExtent();
+    importer->SetDataScalarTypeToUnsignedChar();
+    importer->SetNumberOfScalarComponents( viewCVRGB.channels() );
+    importer->SetImportVoidPointer( viewCVRGB.data );
+    importer->Update();
+}
+
+void plotGaussianConfidenceEllipse(cv::Mat & img, const GaussianInfo<double> & prQOi, const Eigen::Vector3d & color)
+{
+    assert(prQOi.dim() == 2);
+
+    int markerSize              = 24;
+    int markerThickness         = 2;
+
+    Eigen::MatrixXd rQOi_ellipse = prQOi.confidenceEllipse(3, 100);
+
+    cv::Scalar bgr(color(2), color(1), color(0));
+
+    Eigen::VectorXd murQOi = prQOi.mean();
+    cv::drawMarker(img, cv::Point(murQOi(0), murQOi(1)), bgr,   cv::MARKER_CROSS,   markerSize, markerThickness);
+    Eigen::VectorXd rQOi_seg1, rQOi_seg2;
+
+    for (int i = 0; i < rQOi_ellipse.cols()-1; ++i)
+    {
+        rQOi_seg1   = rQOi_ellipse.col(i);
+        rQOi_seg2   = rQOi_ellipse.col(i+1);
+
+        bool isInWidth1  = 0 <= rQOi_seg1(0) && rQOi_seg1(0) <= img.cols-1;
+        bool isInHeight1 = 0 <= rQOi_seg1(1) && rQOi_seg1(1) <= img.rows-1;
+        
+        bool isInWidth2  = 0 <= rQOi_seg2(0) && rQOi_seg2(0) <= img.cols-1;
+        bool isInHeight2 = 0 <= rQOi_seg2(1) && rQOi_seg2(1) <= img.rows-1;
+        bool plotLine   = isInWidth1 && isInHeight1 && isInWidth2 && isInHeight2;
+        if (plotLine)
+        {
+            cv::line(img, 
+                cv::Point(rQOi_seg1(0), rQOi_seg1(1)),
+                cv::Point(rQOi_seg2(0), rQOi_seg2(1)),
+                bgr,
+                2);
+        }
+    }
+}
