@@ -26,6 +26,9 @@
 %   times, and the loop calls STEPPLAYERWALK/COMPUTEBALLDETECTION
 %   directly instead of EVENT.PROCESS.
 
+clc;
+clear all;
+
 verbosity = 1; % 0: silent, 1: dots per step, 2: summary at the end
 
 % Ensure no unit tests fail before continuing

@@ -1,3 +1,6 @@
+clc;
+clear all;
+
 % Enable and run the smoother
 runSmoother = false;
 
