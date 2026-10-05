@@ -76,10 +76,11 @@ assert(~any([results.Failed]));
 linkDropProb   = 0.20;  % probability a packet is lost on a given sender -> receiver link
 gateSigma      = 3;     % association gate, in sigmas (chi-square region of the same probability mass, on the full innovation covariance S = H*P*H' + R)
 oneToOne       = true;  % within one scan, a track may take at most one detection (greedy global nearest neighbour); false = each detection independently takes its nearest gated track
+mergeMaxStd    = 1.0;   % m, only merge tracks whose position uncertainty (largest std) is below this -- two vague tracks always 'agree'
 mergeSigma     = 3;     % live same-class tracks whose position estimates agree within this many sigmas (combined covariance) are duplicates: the one with fewer fused detections is dropped. NaN = never merge
 maxMisses      = 5;     % consecutive expected-but-unseen scans before a track is deleted
 expectedMargin = 0.8;   % fraction of FOV half-angle / range inside which a track counts as "expected" in a scan (the detector's confidence fades toward the edge)
-selfExclusion  = 0.5;   % m, tracks this close to the sender are the sender itself, never expected
+selfExclusion  = 1.0;   % m, a ROBOT-class track this close to the sender is the sender itself: never gated against its own detections (range ~ 0 makes the bearing Jacobian blow up and the gate accept anything) and never expected in its scan
 kappaBall      = 0.2;   % 1/s, ball rolling-friction velocity decay rate
 ballAccelStd   = 2.5;   % m/s^2 per sqrt(Hz), fixed process noise for the ball (absorbs kicks; 0.5 lost the ball track after every kick)
 robotAccelStd  = 0.5;   % same, for robots (the opponents' random walk turns at up to 45 deg/s at ~0.8 m/s, ~0.6 m/s^2, plus speed noise 0.5)
@@ -310,6 +311,7 @@ fprintf(1, 'Generated %d packets (%d detections) from %d robots; %.0f%% of links
 
 params.gateThreshold  = chi2inv(2*normcdf(gateSigma) - 1, 3);  % on the 3x1 range-bearing innovation
 params.oneToOne       = oneToOne;
+params.mergeMaxStd    = mergeMaxStd;
 params.spawnPosStd    = spawnPosStd;
 params.mergeThreshold = chi2inv(2*normcdf(mergeSigma) - 1, 2);  % on the 2D position difference (NaN if mergeSigma is NaN)
 params.maxMisses      = maxMisses;
@@ -448,9 +450,14 @@ nt   = numel(tracks);
 % version gated on -- logged only so the two can be compared).
 D2S = inf(nd, nt);
 D2R = inf(nd, nt);
+isSelf = false(1, nt); % robot-class tracks sitting on the sender: it never detects itself
+for k = find([tracks.alive] & strcmp({tracks.Class}, 'robot'))
+    mu = tracks(k).system.density.mean();
+    isSelf(k) = norm(mu(1:2) - pkt.ObserverPosition) < params.selfExclusion;
+end
 for i = 1:nd
     mScore = makeMeasurement(pkt, dets(i));
-    for k = find([tracks.alive] & strcmp({tracks.Class}, dets(i).Class))
+    for k = find([tracks.alive] & strcmp({tracks.Class}, dets(i).Class) & ~isSelf)
         [D2S(i, k), D2R(i, k)] = gateStats(mScore, tracks(k).system, dets(i).y);
     end
 end
@@ -491,12 +498,21 @@ for i = 1:nd
         % Fuse the detection into the vague prior right away (so the new
         % track has a first update and a history to plot), but do not log
         % it as an association -- it would pollute the d2 calibration.
-        newTrack = fuseDetection(newTrack, pkt, d, 0, 0, truth);
+        [newTrack, ~, failed] = fuseDetection(newTrack, pkt, d, 0, 0, truth);
         tracks(end + 1) = newTrack; %#ok<AGROW>
         k = numel(tracks);
+        % Spawn event: aux = [position std after the first fusion, its error vs the truth]
+        Pn = tracks(k).system.density.cov();
+        mn = tracks(k).system.density.mean();
+        xT = trueStateAt(d.TrueLabel, pkt.time, truth);
+        ev.life = sqrt(max(eig(Pn(1:2, 1:2))));
+        ev.aux  = norm(mn(1:2) - xT(1:2));
     else
         k = assign(i);
-        [tracks(k), ev] = fuseDetection(tracks(k), pkt, d, D2S(i, k), D2R(i, k), truth);
+        [tracks(k), ev, failed] = fuseDetection(tracks(k), pkt, d, D2S(i, k), D2R(i, k), truth);
+    end
+    if failed
+        evs = [evs, makeEvent('fusefail', pkt.time, tracks(k).Name, tracks(k).TrueLabel, d.TrueLabel, 0, 0, 0, false, '', 0)]; %#ok<AGROW>
     end
     took(i) = k;
     seen(k) = true; % a spawn grows TRACKS, so SEEN may need to grow too
@@ -520,7 +536,9 @@ end
 % Deletion: only tracks that SHOULD have been in this scan but weren't
 % fused count a miss; a track merely out of view is left alone.
 for k = find([tracks.alive] & ~seen)
-    if expectedVisible(tracks(k).system.density.mean(), pkt, params)
+    mu = tracks(k).system.density.mean();
+    isSender = strcmp(tracks(k).Class, 'robot') && norm(mu(1:2) - pkt.ObserverPosition) < params.selfExclusion;
+    if ~isSender && expectedVisible(mu, pkt, params)
         tracks(k).misses = tracks(k).misses + 1;
         if tracks(k).misses >= params.maxMisses
             tracks(k).alive        = false;
@@ -585,6 +603,9 @@ for a = 1:n - 1
                 || ismember(j, tracks(i).distinct)
             continue
         end
+        if sqrt(max(eig(P(:, :, a)))) > params.mergeMaxStd || sqrt(max(eig(P(:, :, b)))) > params.mergeMaxStd
+            continue % too vague to call it a duplicate
+        end
         dm = mu(:, a) - mu(:, b);
         d2 = dm.' * ((P(:, :, a) + P(:, :, b)) \ dm);
         if d2 > params.mergeThreshold
@@ -601,7 +622,7 @@ for a = 1:n - 1
         tracks(drop).deletedAt    = t;
         tracks(drop).DeleteReason = 'merged';
         evs = [evs, makeEvent('merge', t, tracks(drop).Name, tracks(drop).TrueLabel, tracks(keep).TrueLabel, ...
-            d2, 0, numel(tracks(drop).queue), strcmp(tracks(drop).TrueLabel, tracks(keep).TrueLabel), ...
+            d2, norm(dm), numel(tracks(drop).queue), strcmp(tracks(drop).TrueLabel, tracks(keep).TrueLabel), ...
             tracks(keep).Name, t - tracks(drop).SpawnTime)]; %#ok<AGROW>
     end
 end
@@ -611,19 +632,18 @@ function tf = expectedVisible(mu, pkt, params)
 %EXPECTEDVISIBLE Would a target at estimated position MU be comfortably
 %   inside this scan's FOV wedge and range? "Comfortably" = within
 %   PARAMS.EXPECTEDMARGIN of the half-angle and range (the detector's
-%   confidence fades toward both edges, so edge misses are normal), and
-%   not so close to the sender that it's the sender itself.
+%   confidence fades toward both edges, so edge misses are normal). The
+%   caller handles the sender's own track.
 
 d = mu(1:2) - pkt.ObserverPosition;
 r = norm(d);
 angErr = atan2(sin(atan2(d(2), d(1)) - pkt.LookHeading), cos(atan2(d(2), d(1)) - pkt.LookHeading));
 
-tf = r > params.selfExclusion ...
-    && r <= params.expectedMargin * pkt.Range ...
+tf = r <= params.expectedMargin * pkt.Range ...
     && abs(angErr) <= params.expectedMargin * pkt.FOV / 2;
 end
 
-function [track, ev] = fuseDetection(track, pkt, d, d2S, d2R, truth)
+function [track, ev, failed] = fuseDetection(track, pkt, d, d2S, d2R, truth)
 %FUSEDETECTION Fuse detection D into TRACK (already predicted to the
 %   scan time) and return the debug event.
 
@@ -638,7 +658,10 @@ track.misses = 0;
 
 % MEASUREMENTBALLBEARING/UPDATE already catches and warns on optimiser
 % non-convergence itself (leaving the density at its predict-only state).
+lastwarn('');
 [m, track.system] = m.process(track.system);
+[~, warnId] = lastwarn;
+failed = strcmp(warnId, 'MeasurementBallBearing:updateFailed');
 track.queue(end + 1) = m;
 
 ev = makeEvent('assoc', pkt.time, track.Name, track.TrueLabel, d.TrueLabel, d2S, d2R, ...
@@ -675,7 +698,13 @@ u = d.y(1:2) / norm(d.y(1:2));
 r = d.y(3);
 
 P0   = blkdiag(params.spawnPosStd^2*eye(2), 2.5^2*eye(2));
-mu0  = [pkt.ObserverPosition + r*u; 0; 0];
+% Start the vague prior 1 m SHORT of the measured range, not on it. Exactly
+% on it the likelihood and prior gradients are both zero, BFGSTrustSqrt takes
+% no step, and its sqrt-Hessian (the posterior covariance) is returned
+% unchanged -- i.e. the track would stay at the prior's 3 m std after its
+% first fusion. Off the optimum it takes real steps and builds the Hessian.
+% The resulting pull towards the prior is ~0.03 m.
+mu0  = [pkt.ObserverPosition + max(r - 1, 0.5)*u; 0; 0];
 
 sys = SystemBall();
 sys.time = pkt.time;
@@ -737,9 +766,13 @@ function ev = makeEvent(type, t, name, trackLabel, detLabel, d2S, d2R, n, flag, 
 %           it was the last live track for that real object.
 %   merge : track NAME dropped as a duplicate of the track named in NOTE
 %           (detLabel = that track's real object), d2S = merge distance,
-%           flag = same real object (a correct merge).
+%           d2R = metres between the two estimates, flag = same real
+%           object (a correct merge).
+%   spawn extras: life = position std (m) of the new track after its
+%           first fusion, aux = its position error (m) vs the truth.
+%   fusefail: an update that did not converge was skipped (name = track).
 ev = struct('type', type, 't', t, 'name', name, 'trackLabel', trackLabel, 'detLabel', detLabel, ...
-    'd2S', d2S, 'd2R', d2R, 'n', n, 'flag', flag, 'note', note, 'life', life);
+    'd2S', d2S, 'd2R', d2R, 'n', n, 'flag', flag, 'note', note, 'life', life, 'aux', 0);
 end
 
 function printDiagnostics(copies, params, labels, truth, viewRobot, debugLog, maxLines)
@@ -808,9 +841,15 @@ if ~isempty(dup)
         qs([dup.d2S]), sum([dup.d2S] <= params.gateThreshold), sum([dup.d2S] > params.gateThreshold));
     fprintf(1, '   R only : %s   (what the old gate used)\n', qs([dup.d2R]));
 end
+fprintf(1, 'Fusions that failed to converge (skipped): %d of %d detections\n', ...
+    sum(strcmp(types, 'fusefail')), numel(A) + numel(S));
 fprintf(1, 'Spawns by reason: first=%d respawn=%d duplicate=%d\n', ...
     sum(strcmp(notes, 'first')), sum(strcmp(notes, 'respawn')), numel(dup));
 
+if ~isempty(S)
+    fprintf(1, 'New tracks after their first fusion: position std percentiles %s m, error %s m\n', ...
+        qs([S.life]), qs([S.aux]));
+end
 if ~isempty(D)
     fprintf(1, '\nDeleted for being expected-but-unseen (%d): lifetime [s] percentiles %s; fused detections %s\n', ...
         numel(D), qs([D.life]), qs([D.n]));
@@ -838,7 +877,7 @@ end
 if debugLog
     L = copies(viewRobot).log;
     types = {L.type};
-    keep = strcmp(types, 'spawn') | strcmp(types, 'delete') | strcmp(types, 'merge') | (strcmp(types, 'assoc') & ~[L.flag]);
+    keep = strcmp(types, 'spawn') | strcmp(types, 'fusefail') | strcmp(types, 'delete') | strcmp(types, 'merge') | (strcmp(types, 'assoc') & ~[L.flag]);
     L = L(keep);
     fprintf(1, '\nEvent log, robot %d copy (spawn / delete / merge / wrong-object fusion), first %d of %d:\n', ...
         viewRobot, min(maxLines, numel(L)), numel(L));
@@ -846,14 +885,17 @@ if debugLog
         ev = L(e);
         switch ev.type
             case 'spawn'
-                fprintf(1, '  [t=%6.2f] SPAWN  %-6s real=%-6s %-9s liveSameObject=%d closest d2S=%.1f (R only %.1f)\n', ...
-                    ev.t, ev.name, ev.trackLabel, ev.note, ev.n, ev.d2S, ev.d2R);
+                fprintf(1, '  [t=%6.2f] SPAWN  %-6s real=%-6s %-9s liveSameObject=%d closest d2S=%.1f (R only %.1f); new track std=%.2fm err=%.2fm\n', ...
+                    ev.t, ev.name, ev.trackLabel, ev.note, ev.n, ev.d2S, ev.d2R, ev.life, ev.aux);
             case 'delete'
                 fprintf(1, '  [t=%6.2f] DELETE %-6s real=%-6s fused=%d lived=%.1fs lastTrackForObject=%d\n', ...
                     ev.t, ev.name, ev.trackLabel, ev.n, ev.life, ev.flag);
             case 'merge'
-                fprintf(1, '  [t=%6.2f] MERGE  %-6s real=%-6s into %s (real=%s) d2=%.2f fused=%d sameObject=%d\n', ...
-                    ev.t, ev.name, ev.trackLabel, ev.note, ev.detLabel, ev.d2S, ev.n, ev.flag);
+                fprintf(1, '  [t=%6.2f] MERGE  %-6s real=%-6s into %s (real=%s) d2=%.2f apart=%.2fm fused=%d sameObject=%d\n', ...
+                    ev.t, ev.name, ev.trackLabel, ev.note, ev.detLabel, ev.d2S, ev.d2R, ev.n, ev.flag);
+            case 'fusefail'
+                fprintf(1, '  [t=%6.2f] FUSION FAILED (optimiser did not converge, skipped) track %-6s real=%-6s detection of %s\n', ...
+                    ev.t, ev.name, ev.trackLabel, ev.detLabel);
             case 'assoc'
                 fprintf(1, '  [t=%6.2f] WRONG  detection of %-6s fused into %-6s (real=%s) d2S=%.1f\n', ...
                     ev.t, ev.detLabel, ev.name, ev.trackLabel, ev.d2S);
