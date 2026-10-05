@@ -50,8 +50,11 @@ classdef MeasurementBallBearing < MeasurementGaussianLikelihood
         ObserverCovariance (2, 2) double = zeros(2, 2) % Observer's own position covariance, m^2
         ObserverHeadingVariance (1, 1) double = 0      % Observer's own heading-belief variance, rad^2 -- see NOISEDENSITY
         DetectionNoiseStd (1, 1) double = deg2rad(1)   % Tangential noise std of the raw bearing detection (rad, since a unit bearing's tangential displacement for a small angle equals the angle itself)
+        RangeNoiseStd (1, 1) double = nan              % Fixed std of the range measurement, m. NaN (default) = bearing-only, y is the 2x1 unit vector and NOISEDENSITY uses the assumed-depth term; finite = range-bearing, y = [unit bearing; range] (3x1) -- see PREDICT/NOISEDENSITY
         RobotID (1, 1) double = 0                      % Which robot/observer this measurement came from (bookkeeping only)
         TargetName (1, :) char = ''                     % Which tracked object this is a measurement OF, e.g. 'ball'/'opp1' (bookkeeping only -- the class/prediction math never reads it). Real detections would need an actual data-association step to assign this when several targets could look alike; here it's assumed known.
+
+        AlreadyDetected (1, 1) logical = false         % Skip UPDATE's own COMPUTEBALLDETECTION re-check and trust LASTDETECTION as already set. Used by a data-association front end that has already decided detection-worthiness against ground truth once, when generating this measurement's Y -- re-running COMPUTEBALLDETECTION here would draw a fresh random confidence jitter and could inconsistently flip that outcome.
 
         % FOV-cone/YOLO-threshold detection gate (see UPDATE), reusing
         % COMPUTEBALLDETECTION's model from the 2D single-player demo.

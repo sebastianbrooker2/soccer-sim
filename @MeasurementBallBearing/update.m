@@ -22,16 +22,22 @@ function [obj, system] = update(obj, system)
 %   fusion filter shouldn't crash because one optimisation step didn't
 %   converge either. A warning is still raised so it's visible, not
 %   silent.
+%
+%   If ALREADYDETECTED is set, the check above is skipped entirely and
+%   LASTDETECTION (set by the caller) is trusted as-is -- see its property
+%   doc comment for why.
 
-robot.Position   = obj.TrueObserverPosition.';
-robot.Heading    = obj.TrueObserverHeading;
-robot.GazeOffset = obj.TrueObserverGazeOffset; % picked up automatically by COMPUTEBALLDETECTION/COMPUTEFOVGEOMETRY's existing isfield(player,'GazeOffset') check
-robot.FOV        = obj.ObserverFOV;
-robot.Range      = obj.ObserverRange;
+if ~obj.AlreadyDetected
+    robot.Position   = obj.TrueObserverPosition.';
+    robot.Heading    = obj.TrueObserverHeading;
+    robot.GazeOffset = obj.TrueObserverGazeOffset; % picked up automatically by COMPUTEBALLDETECTION/COMPUTEFOVGEOMETRY's existing isfield(player,'GazeOffset') check
+    robot.FOV        = obj.ObserverFOV;
+    robot.Range      = obj.ObserverRange;
 
-ball.Position = system.x_sim(1:2).';
+    ball.Position = system.x_sim(1:2).';
 
-obj.LastDetection = computeBallDetection(robot, ball);
+    obj.LastDetection = computeBallDetection(robot, ball);
+end
 
 if obj.LastDetection.Detected
     try

@@ -7,7 +7,7 @@ function det = computeBallDetection(player, ball)
 %   vision-based ball detector behaves: it starts near-certain and loses
 %   confidence the farther the ball is and the less centred it is in the
 %   FOV, with a little frame-to-frame jitter, and clipped so nothing
-%   below the detector's 60% confidence cutoff is ever reported as a
+%   below the detector's 20% confidence cutoff is ever reported as a
 %   detection.
 %
 %   Returns a struct:
@@ -16,11 +16,11 @@ function det = computeBallDetection(player, ball)
 %                 [-pi, pi] (0 = dead centre of FOV)
 %     Confidence  simulated confidence in [0, 1]; 0 whenever the ball is
 %                 outside the FOV wedge or beyond Range
-%     Detected    true only when Confidence >= 0.60 (the detector's
+%     Detected    true only when Confidence >= 0.20 (the detector's
 %                 cutoff) -- below that, a real detector simply would
 %                 not report a box, so nothing is "detected" here either
 
-    CONFCUTOFF = 0.60;
+    CONFCUTOFF = 0.20;
 
     if isfield(player, 'GazeOffset')
         lookHeading = player.Heading + player.GazeOffset;

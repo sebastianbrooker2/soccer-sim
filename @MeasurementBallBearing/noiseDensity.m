@@ -40,8 +40,23 @@ t = [-u(2); u(1)];      % unit tangential vector, perpendicular to u
 sigmaTangential2 = obj.DetectionNoiseStd^2 + obj.ObserverHeadingVariance ...
     + (t.' * obj.ObserverCovariance * t) / r^2;
 
-assumedDepthStd = 1; % m -- rough assumed depth precision (e.g. from apparent target size), not a numerical fudge factor
-R = sigmaTangential2 * (t*t.') + assumedDepthStd^2 * (u*u.');
+if isnan(obj.RangeNoiseStd)
+    assumedDepthStd = 1; % m -- rough assumed depth precision (e.g. from apparent target size), not a numerical fudge factor
+    R = sigmaTangential2 * (t*t.') + assumedDepthStd^2 * (u*u.');
+else
+    % Range-bearing: y = [unit bearing; range]. The bearing block is
+    % isotropic with the tangential variance -- the radial part of a
+    % unit vector carries no information about the target (dh/dx has
+    % no component along u), so this is just the noise of the raw 2D
+    % direction vector, and it keeps the block full rank without an
+    % invented depth term. The range is a genuine measurement with a
+    % fixed std, plus the observer's own position uncertainty along the
+    % line of sight (the component dropped from the bearing above).
+    % Bearing/range noise is treated as uncorrelated, which ignores the
+    % small correlation the shared observer-position error creates.
+    sigmaRange2 = obj.RangeNoiseStd^2 + u.' * obj.ObserverCovariance * u;
+    R = blkdiag(sigmaTangential2 * eye(2), sigmaRange2);
+end
 R = (R + R.') / 2; % symmetrize away round-off
 
 out = GaussianInfo.fromMoment(R);

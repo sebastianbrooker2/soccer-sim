@@ -170,6 +170,9 @@ end
 
 %% Build one independent event queue + run one independent filter per target
 
+% independant state since they dont have any dependacy. if all tracked at
+% same time, lots of 0's in matrix
+
 numOpp  = numel(oppStarts);
 numTeam = numel(robots);
 

@@ -7,6 +7,11 @@ classdef SystemBall < SystemEstimatorSimulator
 %   carried per-measurement by MEASUREMENTBALLPOSITION, not simulated
 %   here.
 
+    properties
+        Kappa (1, 1) double = 0           % Rolling-friction velocity decay rate, 1/s. 0 (default) is plain constant velocity (what robots use); > 0 gives the ball's exponential velocity decay -- see DYNAMICS
+        AccelNoiseStd (1, 1) double = 0.1 % Std of the white acceleration noise driving the velocity states, m/s^2 per sqrt(Hz) -- see PROCESSNOISE
+    end
+
     methods
         function obj = SystemBall()
             % Call superclass constructor(s)

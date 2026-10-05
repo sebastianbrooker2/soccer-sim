@@ -12,7 +12,7 @@ function [pdw, idx] = processNoise(obj, dt)
 % measurement noise, made the prior so wide that BFGSTrustSqrt couldn't
 % converge on the likelihood peak within its iteration budget. 2.5 is a
 % middle ground between them.
-SQ = diag([0.1, 0.1]);
+SQ = obj.AccelNoiseStd*eye(2);
 
 % Indices of process model equations where process noise is injected
 idx = [3, 4];
