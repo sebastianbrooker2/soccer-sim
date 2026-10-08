@@ -1,63 +1,4 @@
-% RUN_5V5_DATA_ASSOCIATION 5v5 with NO given target identity: our five
-%   stationary sensing robots see "there's a ball-or-robot-shaped thing
-%   over there" and nothing more -- they track the ball AND all ten
-%   robots on the field (themselves excluded, since a robot doesn't
-%   detect itself), and have to figure out WHICH tracked thing (or
-%   whether it's a brand new thing) each individual detection belongs to
-%   themselves.
-%
-%   This replaces RUN_5V5_STATIONARY_ROBOTS's TargetName-known-in-advance
-%   event queues with a single global, chronological queue of RAW,
-%   UNLABELLED detections (built below, using SIMULATEBEARINGDETECTION for
-%   each one's noisy measurement) and an online nearest-neighbour-with-
-%   gating data-association step (see ASSOCIATEANDUPDATE) that, for every
-%   detection in turn:
-%     1. Predicts every currently-live track to the detection's time.
-%     2. Scores the detection's measured bearing against each track's
-%        predicted bearing distribution (MEASUREMENTBALLBEARING's own
-%        PREDICT + NOISEDENSITY, reused unchanged) using
-%        GaussianInfo.isWithinConfidenceRegion for gating and the
-%        underlying whitened-residual Mahalanobis distance for ranking.
-%     3. Fuses the detection into the best-gated track, or -- if nothing
-%        gates -- spawns a brand new SYSTEMBALL track initialised by
-%        back-projecting the bearing to the same ~1m assumed depth
-%        MEASUREMENTBALLBEARING/NOISEDENSITY already assumes.
-%   Everything downstream of that (SYSTEMBALL, MEASUREMENTBALLBEARING,
-%   the sqrt-information fusion machinery, STEPTHROUGHMULTITARGETTRACKING)
-%   is exactly the same as every other script in this repo -- tracks are
-%   just as independent as before, only now there's a real front-end
-%   deciding which track a detection belongs to instead of it being
-%   handed to us as TargetName.
-%
-%   Ground truth is still fully known to THIS SCRIPT (we're simulating
-%   it), and is used for two things that have nothing to do with the
-%   filter/associator itself: (1) generating realistic detections in the
-%   first place (COMPUTEBALLDETECTION decides Detected/Confidence from
-%   true geometry, and SIMULATEBEARINGDETECTION draws the noisy
-%   measurement from the true bearing), and (2) a TrueLabel tag stapled
-%   onto each track purely for our own plot legends/titles, so we can see whether
-%   association actually landed on the right real object -- the
-%   associator itself never reads TrueLabel. A track that mis-associates
-%   (locks onto the wrong nearby object, or a single real object ends up
-%   fragmented into more than one track) is a real, expected possibility
-%   here, not a bug to hide -- that's exactly the kind of thing data
-%   association exists to get right, and this simple nearest-neighbour/
-%   gating version won't always manage it perfectly. No track deletion
-%   is implemented either -- once spawned a track lives for the whole
-%   run, same as every existing filter here never being "reset".
-%
-%   Two detector changes from RUN_5V5_STATIONARY_ROBOTS, both requested
-%   explicitly:
-%     - Each sensing robot's Range (the YOLO cone's detection radius) is
-%       1.8x bigger.
-%     - COMPUTEBALLDETECTION's confidence cutoff dropped from 60% to 20%
-%       (see that file) -- a GLOBAL change, since it's one shared
-%       detector used by every script here, not a per-robot property.
-%   Combined, these substantially increase how many detections get
-%   generated (bigger cone area, and a much wider slice of that cone now
-%   clears the confidence bar) -- expect this run to be considerably
-%   heavier than RUN_5V5_STATIONARY_ROBOTS, which was already flagged as
-%   heavy.
+% RUN_5V5_DATA_ASSOCIATION 
 
 clc;
 clear all;
@@ -70,11 +11,12 @@ assert(~any([results.Failed]));
 
 %% Stationary sensing robots -- same 5v5 formation as
 % RUN_5V5_STATIONARY_ROBOTS (our five on x<0 facing forward, head-panning
-% +-80 degrees), just with Range scaled up 1.8x.
+% +-80 degrees)
 clear robots
 
 RANGE_SCALE = 1.8;
 
+%create our team robots stationary for now
 robots(1).Position          = [-8; -4];
 robots(1).Covariance        = diag([0.02, 0.02]);
 robots(1).DetectionNoiseStd = deg2rad(0.75);
@@ -132,20 +74,15 @@ robots(5).GazePhase0         = 8*pi/5;
 
 T_total = 15; % seconds
 
-%% Ground truth for everything on the field, precomputed on a dense grid
-% -- this is ONLY used to (a) decide whether a detection happens at all
-% and (b) draw its noisy bearing, and (for our own bookkeeping/plots
-% only) to know what a track's TrueLabel actually did. None of this is
-% available to the associator/filter.
+%% Ground truth for everything moving things %%disclaimer AI gave me this I
+% just validated ground truth movements visually
 
 cfg   = fieldConfig();
 dtSim = 0.02;
 tGrid = 0:dtSim:T_total;
 Nt    = numel(tGrid);
 
-% Ball: same scripted kicks as the earlier scripts, integrated on this
-% dense grid directly (rather than through SYSTEMBALL/the event queue,
-% since ground truth here needs to be known before any queue exists).
+% Ball: same scripted kicks
 kickTimes      = [1.5, 3.5, 6.5, 10];
 kickVelocities = [-0.75, -3.875; ...
                    -3.917,  3.375; ...
@@ -157,6 +94,9 @@ ballVel = zeros(2, Nt);
 bx = [0; 0];
 bv = [1; 0.5];
 nextKick = 1;
+
+% should be a friction model that matches our process
+% model
 for kk = 1:Nt
     ballPos(:, kk) = bx;
     ballVel(:, kk) = bv;
@@ -170,7 +110,7 @@ for kk = 1:Nt
     end
 end
 
-% Opposition: same 5-robot smooth random walk as RUN_5V5_STATIONARY_ROBOTS.
+% Opposition robots, same 5-robot smooth random walk as RUN_5V5_STATIONARY_ROBOTS.
 oppStarts(1) = struct('Position', [4, -5], 'Heading', deg2rad(60));
 oppStarts(2) = struct('Position', [5, 5],  'Heading', deg2rad(-120));
 oppStarts(3) = struct('Position', [8, 0],  'Heading', deg2rad(180));
@@ -198,14 +138,14 @@ for o = 1:numOpp
     oppVel{o} = velHist;
 end
 
-%% Build the global, unlabelled, chronological detection queue
-% One sensing robot's scan at one instant can see several real objects
-% at once -- the ball, teammates, opponents -- so this is a nested loop
-% over (robot, time, candidate object), keeping only what actually
-% clears COMPUTEBALLDETECTION's FOV/range/confidence gate. TRUELABEL is
-% stapled on purely for our own later bookkeeping (see header comment).
+%% Build the detection queue
+% One robot's scan at one instant can see several real objects
+% at once -- the ball, teammates, opponents -- as what yolo would produce. 
+% 
 
 numTeam = numel(robots);
+
+
 detections = struct('time', {}, 'RobotID', {}, 'ObserverPosition', {}, ...
     'ObserverCovariance', {}, 'DetectionNoiseStd', {}, 'ObserverHeadingVariance', {}, ...
     'y', {}, 'TrueLabel', {}, 'LastDetection', {});
