@@ -1,21 +1,4 @@
 % RUN_MOVING_ROBOTS_STATIONARY_BALL Test SYSTEMBALL/MEASUREMENTBALLBEARING
-%   with the roles reversed from RUN_TRACK_BALL_STATIONARY_ROBOTS: the
-%   ball sits still (slightly off centre), and this time it's the four
-%   robots that move, each doing its own smooth random walk around the
-%   field (reusing CREATEPLAYER/STEPPLAYERWALK's OU-filtered unicycle
-%   model, unchanged). Same event system, same MEASUREMENTBALLBEARING,
-%   same centralised-fusion behaviour as before.
-%
-%   The new part: each robot's BELIEVED pose now drifts away from its
-%   TRUE pose over time (an independent OU bias per robot, in position
-%   and heading), and the covariance it reports grows correspondingly --
-%   via the exact variance ODE of that same OU process (dVar/dt =
-%   -2*damping*Var + noiseStd^2), not a fixed guess -- so the reported
-%   uncertainty is provably consistent with the drift actually
-%   happening. TrueObserverPosition/TrueObserverHeading (ground truth)
-%   drive the FOV visibility gate; ObserverPosition/ObserverCovariance/
-%   ObserverHeadingVariance (the belief) drive the shared measurement
-%   itself -- see MEASUREMENTBALLBEARING.
 
 clc;
 clear all;
@@ -32,10 +15,7 @@ assert(~any([results.Failed]));
 ballPosition = [1.5, 0.8];
 
 %% Robots: smooth random walk, with a drifting belief about their own pose
-% Cleared first: ROBOTS is built field-by-field below, and a leftover
-% ROBOTS from a previous RUN_TRACK_BALL_STATIONARY_ROBOTS run in this
-% session (with just Position/Covariance/etc., no .t history) would
-% otherwise leave STEPTHROUGHBALLTRACKING treating these as static.
+
 clear robots robotStarts robotSpecs
 
 cfg = fieldConfig();
