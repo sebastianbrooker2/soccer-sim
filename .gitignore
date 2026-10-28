@@ -3,3 +3,46 @@
 slprj/
 codegen/
 *.mex*
+
+# ---- python / matlab junk
+__pycache__/
+*.pyc
+*.asv
+*.m~
+MUJOCO_LOG.TXT
+*.log
+*.pkl
+
+# ---- virtualenvs (recreate from requirements.txt, see README.md)
+venv/
+.venv/
+
+# ---- result / data artefacts (regenerable)
+*.mat
+eval/results/**/timeseries_match*.csv
+eval/gt/old/
+# GT CSVs real01..real10 (~8 MB each) are tracked (offline evaluation on all 10 matches); det01 scratch is not.
+eval/gt/det01.csv
+
+# ---- recordings: raw replay chunks, logs, per-frame debug images, det01 scratch run
+recordings/*/data/
+recordings/*/yolo/samples/
+recordings/det01/
+recordings/*.log
+recordings/*/yolo/dets_all.csv
+# (recordings/*.result.json and recordings/realNN/yolo/{dets,dets_frames}.csv + stats.json are tracked, NN=01..10)
+
+# ---- yolo: bulky calibration dumps (regenerate with tools/yolo/dumpYoloCalib.m + calib_report.py)
+tools/yolo/calib/before.csv
+tools/yolo/calib/after.csv
+tools/yolo/calib/stage1.csv
+
+# ---- viz / render: cached frames and outputs
+tools/viz/cache/
+tools/viz/cache_top/
+tools/viz/cache_broadcast/
+tools/viz/out/
+tools/render/out*/
+tools/render/montage*.png
+
+# ---- ballstudy / compare3 intermediate .mat covered by *.mat above
