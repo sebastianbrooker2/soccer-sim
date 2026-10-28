@@ -1,0 +1,9 @@
+Model: Booster K1
+Delivery Time: 2024-10-18
+Name: Euler
+Nickname: Virtual Euler
+Model Version: 2.3.2
+SN: apuwg
+Platform: Single
+Edition: Geek
+Simulation Type: Mujoco

@@ -1,0 +1,4 @@
+onnxruntime-gpu   # or: onnxruntime (CPU only; slower)
+numpy
+opencv-python-headless
+mujoco

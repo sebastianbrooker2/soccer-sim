@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<extensions>
+  <visual_scene name="game_control" mode="forced"/>
+
+  <physics
+     name="robot_controller"
+     auto_spawn_robots="all"
+     startup_mode="multi"/>
+
+  <extension_process
+     name="replay_state_publisher"
+     target_hz="20"
+     />
+
+  <extension_process
+     name="game_control"
+     publish_transport="json_string"
+     json_topic="/soccer/game_controller"
+     players_per_team="3"
+     home_team_number="1"
+     away_team_number="2"
+     home_robots="robot1:1,robot2:2,robot3:3"
+     away_robots="robot4:1,robot5:2,robot6:3"
+     initial_home_team_name="Challenger"
+     initial_away_team_name="Booster AI"
+     field_orientation="homeDefendsLeftGoal"
+     ground_truth_enabled="true"
+     ground_truth_ball_topic_template="/team{team_number}/soccer/sim/ground_truth/ball"
+     ground_truth_robot_pose_topic_template="/team{team_number}/{sim_robot_name}/soccer/sim/ground_truth/robot_pose"
+     ground_truth_robot_scope="all_robots"
+     home_ground_truth_mirror="false"
+     away_ground_truth_mirror="true"
+     />
+
+  <!-- Added for recording: geometric detection publisher (/robotN/soccer/sim/vision/detections) -->
+  <extension_process
+     name="detection_extension"
+     field_type="adult_size"
+     yolo_export_enabled="false"
+     yolo_export_dir="./yolo_dataset"
+     yolo_export_skip_interval="6"/>
+</extensions>
